@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>西松屋検索バーコード&OCRスキャナ（修正版）</title>
+  <meta name="theme-color" content="#ffffff" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans JP", sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }
+    header { padding: 16px; text-align: center; background: #ffffff; position: sticky; top: 0; border-bottom: 1px solid #e2e8f0; }
+    h1 { font-size: 18px; margin: 0; }
+    main { padding: 16px; max-width: 820px; margin: 0 auto; }
+    .card { background: #fff; border-radius: 16px; box-shadow: 0 6px 24px rgba(15,23,42,.06); padding: 16px; }
+    .video-wrap { position: relative; border-radius: 12px; overflow: hidden; background: #000; height: 360px; display:flex; align-items:center; justify-content:center; }
+    video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    button, input[type="text"] { border-radius: 999px; border: 1px solid #cbd5e1; padding: 10px 14px; font-size: 14px; background: #fff; }
+    button { cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .pill { font-variant-numeric: tabular-nums; background: #eef2ff; color: #3730a3; border-radius: 999px; padding: 6px 10px; min-width:80px; text-align:center }
+    .hint { color: #475569; font-size: 13px; }
+    footer { padding: 16px; text-align: center; color: #64748b; font-size: 12px; }
+    .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; background: #111827; color: #fff; padding: 10px 14px; border-radius: 8px; display: none; z-index:999; }
+    .warning { background:#fff7ed; border:1px solid #ffd8a8; padding:10px; border-radius:8px; color:#663c00; margin-bottom:12px }
+    .log { font-family: monospace; font-size: 12px; color:#334155; background:#f1f5f9; padding:8px; border-radius:8px; margin-top:8px; max-height:160px; overflow:auto }
+    .row-split { display:flex; gap:12px; }
+    .btn-primary { background:#0ea5a4; color:#fff; border-radius:12px; padding:8px 12px; border:0 }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>西松屋検索バーコード&OCRスキャナ（修正版）</h1>
+  </header>
+  <main>
+    <div class="card">
+      <div id="insecureWarning" class="warning" style="display:none">
+        このページが <strong>HTTPS</strong> で配信されてへんと、ブラウザがカメラアクセスをブロックすることがあるで。<br>
+        GitHub Pages / Netlify / Vercel みたいな HTTPS 提供サービスで配信して試してや。
+      </div>
+
+      <p class="hint">使い方：まず「カメラ開始」を押してカメラを起動してや。その後、バーコード読み取り（自動）か、<strong>OCRで数字読み取り</strong>を使えるで。</p>
+
+      <div class="video-wrap">
+        <video id="preview" playsinline muted></video>
+        <div id="videoOverlay" style="position:absolute;left:0;right:0;top:0;bottom:0;display:flex;align-items:center;justify-content:center;pointer-events:none;color:rgba(255,255,255,0.9);font-size:16px">カメラ未起動</div>
+      </div>
+
+      <div class="controls row-split" style="margin-top:12px">
+        <div>
+          <button id="startBtn" class="btn-primary">カメラ開始</button>
+          <button id="stopBtn" disabled>停止</button>
+          <button id="torchBtn" disabled>ライト</button>
+        </div>
+        <div style="flex:1; display:flex; gap:8px; align-items:center">
+          <span id="lastCode" class="pill" aria-live="polite">—</span>
+          <input id="manual" type="text" inputmode="numeric" placeholder="JANコードを手入力" style="flex:1" />
+          <button id="searchBtn">検索へ</button>
+        </div>
+      </div>
+
+      <div class="controls" style="margin-top:8px">
+        <button id="ocrBtn">OCRで数字読み取り</button>
+        <small class="hint">（バーコード読み取れへんときに、パッケージ上の数字をOCRで解析）</small>
+      </div>
+
+      <p class="hint">※ iOS/Safari はユーザー操作（ボタン押下）でカメラ起動が必要やで。ローカルで実行する場合は HTTPS か localhost を使うとええで。</p>
+
+      <div id="log" class="log" aria-live="polite"></div>
+    </div>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <footer>非公式ツールです。検索先: 24028-net.jp</footer>
+
+  <script type="module">
+    // ライブラリ読み込み
+    import { BrowserMultiFormatReader } from 'https://cdn.jsdelivr.net/npm/@zxing/library@latest/+esm';
+    import Tesseract from 'https://cdn.jsdelivr.net/npm/tesseract.js@v5.3.1/dist/tesseract.min.js';
+
+    const video = document.getElementById('preview');
+    const overlay = document.getElementById('videoOverlay');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const torchBtn = document.getElementById('torchBtn');
+    const lastCodeEl = document.getElementById('lastCode');
+    const manual = document.getElementById('manual');
+    const searchBtn = document.getElementById('searchBtn');
+    const ocrBtn = document.getElementById('ocrBtn');
+    const toast = document.getElementById('toast');
+    const logEl = document.getElementById('log');
+    const insecureWarning = document.getElementById('insecureWarning');
+
+    const codeReader = new BrowserMultiFormatReader();
+    let currentStream = null;
+    let torchOn = false;
+    let scanning = false;
+
+    function showToast(msg, timeout = 3000) {
+      toast.textContent = msg;
+      toast.style.display = 'block';
+      setTimeout(() => toast.style.display = 'none', timeout);
+    }
+
+    function log(msg) {
+      const now = new Date().toLocaleTimeString();
+      logEl.textContent = `${now} - ${msg}\n` + logEl.textContent;
+    }
+
+    function gotoNishimatsuyaSearch(code) {
+      if (!code) return;
+      const url = `https://www.24028-net.jp/item_list.html?q=${encodeURIComponent(code)}`;
+      window.location.href = url;
+    }
+
+    // ユーザー操作からカメラ開始（バーコード自動スキャン）
+    async function start() {
+      if (scanning) return;
+
+      // セキュリティチェック
+      if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+        insecureWarning.style.display = 'block';
+        showToast('HTTPS じゃないとカメラが動かへんことがあるで');
+      }
+
+      try {
+        startBtn.disabled = true;
+        overlay.textContent = 'カメラ起動中...';
+        showToast('カメラ起動中...');
+
+        scanning = true;
+
+        // decodeFromConstraints をユーザー操作内で呼ぶことで許可ダイアログを引き出す
+        codeReader.decodeFromConstraints(
+          { video: { facingMode: { ideal: 'environment' } }, audio: false },
+          video,
+          (result, err) => {
+            if (result) {
+              const code = typeof result.getText === 'function' ? result.getText() : (result.text || result.codeResult?.code || '');
+              lastCodeEl.textContent = code;
+              log(`バーコード読み取り: ${code}`);
+              try { navigator.vibrate && navigator.vibrate(100); } catch (e) {}
+              stop();
+              gotoNishimatsuyaSearch(code);
+            }
+            if (err && err.name) {
+              if (err.name === 'NotFoundException') {
+                // ただの未検出は頻繁に出るからログだけ
+                log('バーコード未検出');
+              } else if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
+                log('許可エラー: ' + err.name);
+                showToast('カメラの許可が必要やで。ブラウザの設定でカメラアクセスを許可してや');
+                stop();
+              } else if (err.name === 'NotReadableError') {
+                showToast('カメラにアクセスできへん。別アプリがカメラ使てるかもやで');
+                stop();
+              } else {
+                log(`decode error: ${err.name}`);
+              }
+            }
+          }
+        );
+
+        stopBtn.disabled = false;
+
+        // ライブラリが設定する video.srcObject を待って torch 処理
+        const waitForStream = setInterval(() => {
+          const s = video.srcObject;
+          if (s && s.getVideoTracks && s.getVideoTracks().length) {
+            clearInterval(waitForStream);
+            currentStream = s;
+            overlay.style.display = 'none';
+            enableTorchIfSupported();
+            log('カメラストリーム取得');
+          }
+        }, 200);
+
+      } catch (e) {
+        console.error(e);
+        log(`start error: ${e.name || e.message}`);
+        showToast('カメラ起動に失敗したで: ' + (e.name || e.message));
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        overlay.textContent = 'カメラ未起動';
+        scanning = false;
+      }
+    }
+
+    async function stop() {
+      try {
+        codeReader.reset();
+      } catch (e) { console.warn(e); }
+      if (currentStream) {
+        currentStream.getTracks().forEach(t => t.stop());
+      }
+      video.srcObject = null;
+      currentStream = null;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      torchBtn.disabled = true;
+      overlay.style.display = 'flex';
+      overlay.textContent = 'カメラ未起動';
+      log('カメラ停止');
+      scanning = false;
+    }
+
+    async function enableTorchIfSupported() {
+      try {
+        const track = currentStream?.getVideoTracks()[0];
+        if (!track) return;
+        const capabilities = typeof track.getCapabilities === 'function' ? track.getCapabilities() : {};
+        if (capabilities && 'torch' in capabilities) {
+          torchBtn.disabled = false;
+          torchBtn.onclick = async () => {
+            try {
+              torchOn = !torchOn;
+              await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+              torchBtn.textContent = torchOn ? 'ライト(オン)' : 'ライト';
+            } catch (e) {
+              console.error('torch error', e);
+              showToast('ライトを切り替えられへんかった');
+            }
+          };
+        } else {
+          torchBtn.disabled = true;
+          log('torch 非対応');
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    // OCR: カメラフレームをキャプチャして数字だけ認識
+    async function ocrFromVideo() {
+      if (!video || !video.videoWidth) {
+        showToast('先にカメラを開始してや');
+        return;
+      }
+      showToast('OCR 解析中... 少し待ってや');
+      try {
+        const canvas = document.createElement('canvas');
+        const scale = 1.0;
+        canvas.width = video.videoWidth * scale;
+        canvas.height = video.videoHeight * scale;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        // 画像をトリミングしてバーコード数字領域に寄せると精度上がることがある
+        // ここはシンプルに全体を渡す
+        const dataUrl = canvas.toDataURL('image/png');
+
+        const worker = Tesseract.createWorker({
+          logger: m => log('Tesseract: ' + (m.status || '') + ' ' + (m.progress? Math.round(m.progress*100)+'%':'') )
+        });
+        await worker.load();
+        await worker.loadLanguage('eng');
+        await worker.initialize('eng');
+        // 数字のみ許可
+        await worker.setParameters({ tessedit_char_whitelist: '0123456789' });
+
+        const { data: { text } } = await worker.recognize(dataUrl);
+        await worker.terminate();
+
+        const digits = (text || '').replace(/\D/g, '');
+        log('OCR 結果: ' + digits);
+        if (digits.length === 13 || digits.length === 8) {
+          showToast('OCRで読み取ったで: ' + digits);
+          lastCodeEl.textContent = digits;
+          gotoNishimatsuyaSearch(digits);
+        } else if (digits.length >= 7) {
+          // 近い長さの可能性があるときは提案
+          showToast('OCRで数字が見つかったけど、13桁/8桁ちゃうで: ' + digits);
+          lastCodeEl.textContent = digits;
+        } else {
+          showToast('JANコードっぽい数字は見つからへんかった');
+        }
+
+      } catch (e) {
+        console.error(e);
+        log('OCR error: ' + (e.message || e.name || e));
+        showToast('OCRに失敗したで');
+      }
+    }
+
+    startBtn.addEventListener('click', start);
+    stopBtn.addEventListener('click', stop);
+    searchBtn.addEventListener('click', () => gotoNishimatsuyaSearch(manual.value.trim()));
+    ocrBtn.addEventListener('click', ocrFromVideo);
+
+    // ページロード時の簡易チェック
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+      insecureWarning.style.display = 'block';
+    }
+
+    // ユーザーに期待する挙動を確認するためのコメント（デバッグ用）
+    log('ページ読み込み完了。カメラ開始ボタンを押してや。');
+
+  </script>
+</body>
+</html>
